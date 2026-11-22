@@ -311,6 +311,7 @@ pub struct MenuBar {
     update: bool, // a newer release is out: dot on the logo, item in its menu
     music: Option<crate::media::NowPlaying>,
     music_pos: f64, // last drawn position, so the bar redraws as a song progresses
+    lyric: Option<String>, // current lyric line for the playing song
     battery: Option<(u8, bool, bool)>,
     net: Net,
     ticks: u32,
@@ -328,7 +329,7 @@ impl MenuBar {
             hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray, battery_pct,
             ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
             surface: None, dark_text: false, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
-            app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, music: None, music_pos: -1.0, battery: b, net: n,
+            app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, music: None, music_pos: -1.0, lyric: None, battery: b, net: n,
             ticks: 0, tracking: false, dirty: true, auto_hide_dock: false,
         }
     }
@@ -494,6 +495,12 @@ impl MenuBar {
                 self.music_pos = np.position;
                 self.dirty = true;
             }
+        }
+        // current lyric line follows playback position
+        let ly = self.music.as_ref().and_then(|np| crate::lyrics::current(np.position));
+        if ly != self.lyric {
+            self.lyric = ly;
+            self.dirty = true;
         }
         if self.ai {
             self.read_ai();
@@ -1088,12 +1095,18 @@ Open the download page?")) {
 
     /// Now-playing: a note, "artist – title" (truncated) and a thin progress bar underneath.
     fn music_w(&self) -> f64 {
+        // fixed width while music plays, so changing lyric lines never shift the other status items
         let note = self.text_w("\u{E718}", self.glyph_font(12.0));
-        let text = self.music.as_ref().map(|m| self.music_label(m)).unwrap_or_default();
-        note + 4.0 + self.text_w(&text, self.font(400)).min(150.0)
+        note + 4.0 + 150.0
     }
 
     fn music_label(&self, m: &crate::media::NowPlaying) -> String {
+        // show the current lyric line when we have one, with the song title as fallback
+        if let Some(l) = &self.lyric {
+            if !l.is_empty() {
+                return l.clone();
+            }
+        }
         if m.artist.is_empty() {
             m.title.clone()
         } else {

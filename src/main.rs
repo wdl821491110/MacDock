@@ -24,6 +24,7 @@ mod fly_wifi;
 mod flyout;
 mod genie;
 mod i18n;
+mod lyrics;
 mod genie_gpu;
 mod gfx;
 mod menu;
@@ -605,6 +606,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         let _ = windows::Win32::System::Ole::OleInitialize(None); // drag and drop onto the dock
     }
     media::start(); // now-playing snapshot for the menu bar (own MTA thread)
+    lyrics::start(); // fetch current song's lyrics (own worker thread)
     let cfg = Config::load();
     i18n::set(&cfg.language);
     if cfg.hide_taskbar {
