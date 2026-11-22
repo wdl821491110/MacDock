@@ -100,6 +100,8 @@ enum Item {
     App,
     Menu(&'static str),
     Chevron,
+    /// A tray app pinned to the bar; the payload indexes `pinned_icons`.
+    TrayPinned(usize),
     Ai,
     Battery,
     Net,
@@ -301,6 +303,8 @@ pub struct MenuBar {
     surface: Option<Surface>,
     dark_text: bool, // the wallpaper behind the bar is bright, so the content is drawn black
     slots: Vec<Slot>,
+    /// Tray apps pinned to the bar: (key "exe|name", icon snapshot loaded from disk).
+    pinned_icons: Vec<(String, Option<Pixmap>)>,
     hover: Option<usize>,
     open: Option<usize>,  // its menu or flyout is up
     target: HWND,         // the last foreground window that isn't ours
@@ -324,7 +328,7 @@ impl MenuBar {
         MenuBar {
             hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray, battery_pct,
             ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
-            surface: None, dark_text: false, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
+            surface: None, dark_text: false, slots: Vec::new(), pinned_icons: Vec::new(), hover: None, open: None, target: HWND::default(),
             app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, battery: b, net: n,
             ticks: 0, tracking: false, dirty: true, auto_hide_dock: false,
         }
@@ -653,6 +657,15 @@ impl MenuBar {
         match s.item {
             Item::Logo | Item::App | Item::Menu(_) => return self.show_menu(i),
             Item::Chevron => return Some(BarAct::Flyout(Extra::Tray, l, r)),
+            Item::TrayPinned(i) => {
+                if let Some((key, _)) = self.pinned_icons.get(i) {
+                    let target = key.split('|').next().unwrap_or(key);
+                    if !target.is_empty() {
+                        shell::launch(target);
+                    }
+                }
+                return None;
+            }
             Item::Ai => return Some(BarAct::Flyout(Extra::Ai, l, r)),
             Item::Battery => return Some(BarAct::Flyout(Extra::Battery, l, r)),
             Item::Net => return Some(BarAct::Flyout(Extra::Wifi, l, r)),
@@ -903,6 +916,7 @@ Open the download page?")) {
             Item::App => self.text_w(&self.app_name, self.font(700)),
             Item::Menu(m) => self.text_w(crate::i18n::t(m), self.font(500)),
             Item::Chevron => self.text_w("\u{E70E}", self.glyph_font(11.0)),
+            Item::TrayPinned(_) => 20.0,
             Item::Ai => 14.0 + if self.ai_label.is_empty() { 0.0 } else { 5.0 + self.text_w(&self.ai_label, self.font(400)) },
             Item::Battery => {
                 let t = self.battery_text();
@@ -916,7 +930,22 @@ Open the download page?")) {
         }
     }
 
+    /// Re-read the pinned tray list from config and (re)load icon snapshots when it changes.
+    fn refresh_pinned(&mut self) {
+        let keys: Vec<String> = crate::config::Config::load().menu_pinned;
+        let same = keys.len() == self.pinned_icons.len()
+            && keys.iter().zip(self.pinned_icons.iter()).all(|(k, (old, _))| k == old);
+        if same {
+            return;
+        }
+        self.pinned_icons = keys.into_iter().map(|k| {
+            let img = gfx::image_file(&crate::config::tray_icon_file(&k), 64);
+            (k, img)
+        }).collect();
+    }
+
     fn layout(&mut self) {
+        self.refresh_pinned();
         let mut slots = Vec::new();
         let mut x = SIDE;
         for it in [Item::Logo, Item::App, Item::Menu("File"), Item::Menu("Edit"), Item::Menu("View"), Item::Menu("Window"), Item::Menu("Help")] {
@@ -927,6 +956,9 @@ Open the download page?")) {
         let mut right = vec![];
         if self.tray {
             right.push(Item::Chevron);
+        }
+        for i in 0..self.pinned_icons.len() {
+            right.push(Item::TrayPinned(i));
         }
         if self.ai && self.ai_live {
             right.push(Item::Ai);
@@ -993,6 +1025,19 @@ Open the download page?")) {
                 Item::App => self.draw_text(&mut content, &self.app_name, self.font(700), cx, mid),
                 Item::Menu(m) => self.draw_text(&mut content, crate::i18n::t(m), self.font(500), cx, mid),
                 Item::Chevron => self.draw_text(&mut content, "\u{E70E}", self.glyph_font(11.0), cx, mid),
+                Item::TrayPinned(i) => {
+                    if let Some(Some(img)) = self.pinned_icons.get(i) {
+                        let size = 18.0 * dpi;
+                        content.draw_pixmap(
+                            (cx + 1.0 * dpi).round() as i32,
+                            (mid - size / 2.0).round() as i32,
+                            img.as_ref(),
+                            &PixmapPaint::default(),
+                            Transform::identity(),
+                            None,
+                        );
+                    }
+                }
                 Item::Ai => {
                     draw_ai_ring(&mut content, cx + 7.0 * dpi, mid, 6.0 * dpi, dpi, self.ai_pct, self.ai_label.ends_with("/s"));
                     if !self.ai_label.is_empty() {

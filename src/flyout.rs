@@ -124,6 +124,10 @@ pub enum Cmd {
     OpenWifi,
     /// close and keep this app in the dock
     Pin(String),
+    /// close and pin this tray app to the top menu bar ("exe|name"), saving its icon snapshot
+    PinMenu(String),
+    /// remove this tray app from the top menu bar ("exe|name")
+    UnpinMenu(String),
     /// window panels only (traffic lights): minimize, and fill the screen / back
     Minimize,
     Zoom,

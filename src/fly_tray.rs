@@ -4,10 +4,15 @@
 use std::time::Instant;
 
 use crate::flyout::{white, Cmd, Content, Spot, Ui};
+use crate::shell::Shell;
 use crate::tray;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
 const CELL: f32 = 44.0;
 const ID_ICON: u32 = 100;
+/// Small "pin to menu bar" buttons live in a separate id range so they never collide with icons.
+const ID_PIN: u32 = 5000;
 
 const WM_MOUSEMOVE: u32 = 0x200;
 const WM_LBUTTONDOWN: u32 = 0x201;
@@ -24,12 +29,41 @@ pub struct TrayFly {
     hosted: bool,
     /// (hwnd, uid) per drawn cell, so a click finds its icon even if the list changed since
     shown: Vec<(u32, u32)>,
+    /// "exe|name" key per drawn cell, for pinning to the menu bar.
+    keys: Vec<String>,
     hot: Option<u32>,
 }
 
 impl TrayFly {
     pub fn new() -> TrayFly {
-        TrayFly { opened: Instant::now(), hosted: false, shown: Vec::new(), hot: None }
+        TrayFly { opened: Instant::now(), hosted: false, shown: Vec::new(), keys: Vec::new(), hot: None }
+    }
+
+    /// Resolve an icon's stable key: "exe path|display name". Falls back to the tip/name.
+    fn key_of(ic: &tray::Icon) -> String {
+        let mut shell = Shell::default();
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(HWND(ic.hwnd as usize as *mut _), Some(&mut pid)) };
+        let exe = if pid != 0 { shell.process_info(pid).0.unwrap_or_default() } else { String::new() };
+        let name = if !ic.name.is_empty() {
+            ic.name.clone()
+        } else {
+            ic.tip.lines().next().unwrap_or("").trim().to_string()
+        };
+        format!("{}|{}", exe, name)
+    }
+
+    /// Persist an icon snapshot as PNG. tiny-skia Pixmap is premultiplied RGBA;
+    /// gfx::save_png expects BGRA, so swap R and B.
+    fn save_snapshot(key: &str, img: &tiny_skia::Pixmap) {
+        let (w, h) = (img.width(), img.height());
+        let src = img.data();
+        let mut bgra = Vec::with_capacity(src.len());
+        for px in src.chunks_exact(4) {
+            bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        }
+        let _ = std::fs::create_dir_all(crate::config::tray_icon_dir());
+        crate::gfx::save_png(&crate::config::tray_icon_file(key), w, h, &bgra);
     }
 
     fn with_icon(&self, id: u32, f: impl FnOnce(&tray::Icon)) {
@@ -66,6 +100,8 @@ impl Content for TrayFly {
     fn draw(&mut self, ui: &mut Ui) -> f32 {
         let w = ui.w;
         let mut shown = Vec::new();
+        let mut keys = Vec::new();
+        let pinned = crate::config::Config::load().menu_pinned;
         let h = tray::with_icons(|icons| {
             let visible: Vec<&tray::Icon> = icons.map(|v| v.iter().filter(|i| i.image.is_some() && !i.hidden).collect()).unwrap_or_default();
             let n = visible.len();
@@ -100,12 +136,24 @@ impl Content for TrayFly {
                 if let Some(img) = &ic.image {
                     ui.image(img, cx + (CELL - 20.0) / 2.0, cy + (ch - 20.0) / 2.0, 20.0, 20.0);
                 }
+                let key = TrayFly::key_of(ic);
+                let is_pinned = pinned.iter().any(|p| p == &key);
+                // pin button in the top-right corner of the cell
+                let (px, py) = (cx + CELL - 13.0, cy + 1.0);
+                if ui.hit(ID_PIN + i as u32, px, py, 12.0, 12.0) {
+                    ui.fill(px, py, 12.0, 12.0, 4.0, white(0x40));
+                }
+                // a filled dot marks already-pinned icons
+                ui.fill(px + 3.0, py + 3.0, 6.0, 6.0, 3.0,
+                    if is_pinned { (0xFF, 0x2D, 0x2D, 0xFF) } else { white(0x66) });
                 shown.push((ic.hwnd, ic.uid));
+                keys.push(key);
             }
             y += n.div_ceil(5) as f32 * ch;
             y
         });
         self.shown = shown;
+        self.keys = keys;
         h
     }
 
@@ -113,7 +161,7 @@ impl Content for TrayFly {
         let shown = &self.shown;
         tray::with_icons(|icons| {
             let Some(icons) = icons else { return };
-            for s in spots.iter().filter(|s| s.id >= ID_ICON) {
+            for s in spots.iter().filter(|s| (ID_ICON..ID_PIN).contains(&s.id)) {
                 let Some(&(h, u)) = shown.get((s.id - ID_ICON) as usize) else { continue };
                 if let Some(ic) = icons.iter_mut().find(|i| i.hwnd == h && i.uid == u) {
                     let (l, t) = (origin.0 + (s.x * dpi) as i32, origin.1 + (s.y * dpi) as i32);
@@ -124,7 +172,7 @@ impl Content for TrayFly {
     }
 
     fn hover(&mut self, id: Option<u32>) {
-        let id = id.filter(|&i| i >= ID_ICON);
+        let id = id.filter(|&i| (ID_ICON..ID_PIN).contains(&i));
         if id == self.hot {
             return;
         }
@@ -151,6 +199,30 @@ impl Content for TrayFly {
     }
 
     fn click(&mut self, id: u32, _fx: f32) -> Cmd {
+        // pin / unpin button
+        if (ID_PIN..ID_PIN + self.keys.len() as u32).contains(&id) {
+            let key = self.keys[(id - ID_PIN) as usize].clone();
+            let mut cfg = crate::config::Config::load();
+            if let Some(pos) = cfg.menu_pinned.iter().position(|p| p == &key) {
+                cfg.menu_pinned.remove(pos);
+                cfg.save();
+                return Cmd::UnpinMenu(key);
+            }
+            // save an icon snapshot next to the key so the bar can draw it later
+            let idx = (id - ID_PIN) as usize;
+            if let Some(&(h, u)) = self.shown.get(idx) {
+                tray::with_icons(|icons| {
+                    if let Some(ic) = icons.and_then(|v| v.iter().find(|i| i.hwnd == h && i.uid == u)) {
+                        if let Some(img) = &ic.image {
+                            Self::save_snapshot(&key, img);
+                        }
+                    }
+                });
+            }
+            cfg.menu_pinned.push(key.clone());
+            cfg.save();
+            return Cmd::PinMenu(key);
+        }
         if id < ID_ICON {
             return Cmd::None;
         }

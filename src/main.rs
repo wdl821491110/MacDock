@@ -423,6 +423,12 @@ impl App {
                     match cmd {
                         flyout::Cmd::Launch(t) => shell::launch(&t),
                         flyout::Cmd::Pin(t) => self.dock.pin(&t),
+                        flyout::Cmd::PinMenu(_) | flyout::Cmd::UnpinMenu(_) => {
+                            // the menu bar re-reads the pinned list from config on its next layout
+                            if let Some(b) = self.bar.as_mut() {
+                                b.redraw();
+                            }
+                        }
                         flyout::Cmd::Settings => self.open_settings(),
                         flyout::Cmd::OpenWifi => {
                             if let Some((_, r)) = self.bar.as_ref().and_then(|b| b.extra_span(menubar::Extra::Wifi)) {
