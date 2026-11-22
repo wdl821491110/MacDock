@@ -5,6 +5,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to build (e.g. v0.4.2)"
+        required: true
+        default: "v0.4.2"
 
 permissions:
   contents: write
@@ -27,7 +33,7 @@ jobs:
       - name: Check tag matches Cargo.toml version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}".TrimStart('v')
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
           if ($tag -ne $ver) { throw "Tag v$tag does not match Cargo.toml version $ver" }
 
@@ -46,8 +52,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          gh release create $tag `
-            target\release\macdock.exe target\release\macdock.exe.sha256 `
-            --title "MacDock $($tag.TrimStart('v'))" `
-            --notes-from-tag
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $assets = @("target\release\macdock.exe", "target\release\macdock.exe.sha256")
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag $assets --clobber
+          } else {
+            gh release create $tag $assets `
+              --title "MacDock $($tag.TrimStart('v'))" `
+              --notes "Chinese localization build (Simplified Chinese)"
+          }
