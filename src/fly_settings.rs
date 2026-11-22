@@ -48,8 +48,8 @@ pub enum Change {
     OpenConfig,
 }
 
-const LANGS: [&str; 3] = ["auto", "en", "id"];
-const LANG_NAMES: [&str; 3] = ["Auto", "English", "Indonesia"];
+const LANGS: [&str; 4] = ["auto", "en", "id", "zh"];
+const LANG_NAMES: [&str; 4] = ["Auto", "English", "Indonesia", "中文"];
 const STYLES: [&str; 2] = ["apps", "classic"];
 const STYLE_NAMES: [&str; 2] = ["Apps window", "Full screen"];
 /// the choice rows, in the order their option ids are numbered (ID_CHOICE + 10 * row + option)
@@ -567,6 +567,8 @@ mod tests {
         assert_eq!(c.icon_size, 48.0);
         assert!(apply(&mut c, Key::Language, 2.0));
         assert_eq!(c.language, "id");
+        assert!(apply(&mut c, Key::Language, 3.0));
+        assert_eq!(c.language, "zh");
         c.reduce_motion = true;
         reset_animations(&mut c);
         assert!(!c.reduce_motion);

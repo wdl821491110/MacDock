@@ -48,7 +48,7 @@ pub struct Config {
     pub hide_speed: f64,
     /// Snap instead of animating: magnification, auto-hide and a very short minimize.
     pub reduce_motion: bool,
-    /// Interface language: "auto" (follow Windows), "en" or "id".
+    /// Interface language: "auto" (follow Windows), "en", "id" or "zh".
     pub language: String,
     /// All apps: "apps" (the macOS 26 Apps window, the default) or "classic" (the full-screen Launchpad).
     pub launchpad_style: String,
@@ -176,7 +176,7 @@ impl Config {
         f("AutoHideDelay", &mut c.hide_delay_ms, HIDE_DELAY_MS.0, HIDE_DELAY_MS.1);
         f("AutoHideSpeed", &mut c.hide_speed, SPEED.0, SPEED.1);
         if let Some(l) = v.remove("Language").and_then(|x| x.as_str().map(String::from)) {
-            if ["auto", "en", "id"].contains(&l.as_str()) {
+            if ["auto", "en", "id", "zh"].contains(&l.as_str()) {
                 c.language = l;
             }
         }
