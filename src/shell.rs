@@ -15,7 +15,7 @@ use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{
     GetCurrentProcessId, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, AttachThreadInput,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT};
 use windows::Win32::UI::Shell::PropertiesSystem::{
@@ -472,6 +472,19 @@ mod tests {
 pub fn close(h: HWND) {
     unsafe {
         let _ = PostMessageW(h, WM_CLOSE, windows::Win32::Foundation::WPARAM(0), LPARAM(0));
+    }
+}
+
+/// Force-terminate a process (last resort when WM_CLOSE is ignored, e.g. tray-resident apps).
+pub fn terminate_pid(pid: u32) {
+    if pid == 0 || pid == std::process::id() {
+        return;
+    }
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+            let _ = TerminateProcess(h, 1);
+            let _ = CloseHandle(h);
+        }
     }
 }
 

@@ -1218,7 +1218,7 @@ impl Dock {
             Unpin,
             Keep,
             Explorer,
-            QuitApp,
+            QuitApp(Vec<u32>, Option<String>), // snapshot: pids + exe, captured before the popup
             ChangeIcon,
             ResetIcon,
             HideStack,
@@ -1285,7 +1285,11 @@ impl Dock {
                     }
                     if it.running() {
                         add(Entry::Sep, None);
-                        add(Entry::item("Quit"), Some(Do::QuitApp));
+                        // snapshot now: the popup is a nested message loop and the dock
+                        // item list can be refreshed while it is open, invalidating `i`.
+                        let snap_pids: Vec<u32> = it.wins.iter().map(|w| w.pid).collect();
+                        let snap_exe = it.exe.clone();
+                        add(Entry::item("Quit"), Some(Do::QuitApp(snap_pids, snap_exe)));
                     }
                 }
                 // centred above the icon, its bottom a little over the icon's top
@@ -1330,24 +1334,26 @@ impl Dock {
                     shell::show_in_explorer(&e);
                 }
             }
-            Do::QuitApp => {
-                // Collect the app's pids first (owned), so we can re-enumerate every
-                // visible window of those processes. Closing only the handful of
-                // windows cached in the dock item often fails (stale/hidden hwnds).
-                let pids: Vec<u32> = self.items.get(i)
-                    .map(|it| it.wins.iter().map(|w| w.pid).collect())
-                    .unwrap_or_default();
+            Do::QuitApp(pids, exe) => {
+                // Use the snapshot taken before the popup (the item list may have
+                // been refreshed during the nested menu loop, so `i` is unreliable).
                 let all = self.shell.app_windows();
                 for w in &all {
-                    if pids.contains(&w.pid) {
+                    let by_pid = pids.contains(&w.pid);
+                    let by_exe = exe.as_ref().is_some_and(|e| w.exe.as_ref().is_some_and(|x| shell::eq_ic(e, x)));
+                    if by_pid || by_exe {
                         shell::close(w.hwnd);
                     }
                 }
-                // fallback: also signal the windows we had cached
-                if let Some(it) = self.items.get(i) {
-                    for w in &it.wins {
-                        shell::close(w.hwnd);
-                    }
+                // Graceful WM_CLOSE is ignored by many tray-resident / background
+                // apps. After a short grace period, force-kill the target processes.
+                if !pids.is_empty() {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(900));
+                        for pid in pids {
+                            shell::terminate_pid(pid);
+                        }
+                    });
                 }
             }
             Do::ChangeIcon => {

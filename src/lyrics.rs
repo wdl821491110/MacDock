@@ -91,40 +91,98 @@ fn b64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Pick the candidate whose duration is closest to the playing track (ms).
-fn pick<'a>(cands: &'a [serde_json::Value], dur_ms: u64) -> Option<&'a serde_json::Value> {
-    if cands.is_empty() { return None; }
-    if dur_ms == 0 { return cands.first(); }
-    cands.iter().min_by_key(|c| {
-        let d = c["duration"].as_u64().unwrap_or(0);
-        d.abs_diff(dur_ms)
-    })
+/// Clean a media-session title into a searchable song name.
+/// Handles "歌名 - 歌手", "歌名 (Live)", "歌名 [现场]", "歌名 ft.xxx" etc.
+fn clean_title(t: &str) -> String {
+    let mut s = t.trim().to_string();
+    // "歌名 - 歌手" / "歌名 – 歌手" / "歌名_歌手"
+    for sep in [" - ", " – ", " — ", " _ "] {
+        if let Some(i) = s.find(sep) {
+            s = s[..i].to_string();
+            break;
+        }
+    }
+    // drop parenthesised/bracketed suffixes (Live, remix, 现场, ...)
+    for (open, close) in [('(', ')'), ('（', '）'), ('[', ']'), ('【', '】')] {
+        if let Some(i) = s.find(open) {
+            if s[i..].contains(close) {
+                s = s[..i].to_string();
+            }
+        }
+    }
+    // drop "ft." / "feat." tails
+    for tag in [" ft.", " ft ", " feat.", " feat ", " ft.", " & "] {
+        if let Some(i) = s.to_lowercase().find(&tag.to_lowercase()) {
+            s = s[..i].to_string();
+        }
+    }
+    s.trim().to_string()
 }
 
-fn fetch(title: &str, duration: f64) -> Option<Vec<Line>> {
-    let dur_ms = (duration * 1000.0).round() as u64;
-    let path = format!(
-        "/search?ver=1&man=no&client=pc&keyword={}&duration={}&hash=",
-        urlencode(title),
-        dur_ms
-    );
+fn search(kw: &str) -> Option<Vec<serde_json::Value>> {
+    let path = format!("/search?ver=1&man=no&client=pc&keyword={}&duration=0&hash=", urlencode(kw));
     let (st, body) = crate::claude_oauth::get("lyrics.kugou.com", &path, HDR).ok()?;
     if st != 200 { return None; }
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let cands = v["candidates"].as_array()?;
-    // If duration-based search came back empty, retry with duration=0 (title only).
-    let chosen = match pick(cands, dur_ms) {
-        Some(c) => c.clone(),
-        None => {
-            let path0 = format!("/search?ver=1&man=no&client=pc&keyword={}&duration=0&hash=", urlencode(title));
-            let (st0, body0) = crate::claude_oauth::get("lyrics.kugou.com", &path0, HDR).ok()?;
-            if st0 != 200 { return None; }
-            let v0: serde_json::Value = serde_json::from_str(&body0).ok()?;
-            pick(v0["candidates"].as_array()?, 0)?.clone()
+    Some(v["candidates"].as_array()?.clone())
+}
+
+/// Pick a candidate whose song/singer matches the track; closest duration wins.
+fn pick_match(cands: &[serde_json::Value], title: &str, artist: &str, dur_ms: u64) -> Option<serde_json::Value> {
+    let norm = |s: &str| s.to_lowercase().replace([' ', '　', '-', '_'], "");
+    let t = norm(title);
+    let a = norm(artist);
+    let mut ranked: Vec<(u8, u64, serde_json::Value)> = Vec::new();
+    for c in cands {
+        let song = norm(c["song"].as_str().unwrap_or(""));
+        let singer = norm(c["singer"].as_str().unwrap_or(""));
+        let d = c["duration"].as_u64().unwrap_or(0);
+        // score: exact song match, then song-contained, then artist match
+        let mut score = 0u8;
+        if !t.is_empty() && song == t { score = 3; }
+        else if !t.is_empty() && (song.contains(&t) || t.contains(&song)) { score = 2; }
+        if !a.is_empty() && !singer.is_empty() && (singer == a || singer.contains(&a) || a.contains(&singer)) {
+            score += 2;
         }
-    };
-    let id = chosen["id"].as_u64()?;
-    let ak = chosen["accesskey"].as_str()?;
+        if score > 0 {
+            ranked.push((score, d.abs_diff(dur_ms), c.clone()));
+        }
+    }
+    if ranked.is_empty() {
+        // no match: fall back to the single candidate, or the duration-closest one
+        return if cands.len() == 1 {
+            Some(cands[0].clone())
+        } else if dur_ms > 0 {
+            cands.iter().min_by_key(|c| c["duration"].as_u64().unwrap_or(0).abs_diff(dur_ms)).cloned()
+        } else {
+            cands.first().cloned()
+        };
+    }
+    ranked.sort_by_key(|x| (std::cmp::Reverse(x.0), x.1));
+    ranked.into_iter().next().map(|x| x.2)
+}
+
+fn fetch(title: &str, artist: &str, duration: f64) -> Option<Vec<Line>> {
+    let dur_ms = (duration * 1000.0).round() as u64;
+    let clean = clean_title(title);
+    // Try several keyword forms until one yields a matching candidate.
+    let mut keywords: Vec<String> = Vec::new();
+    if !clean.is_empty() { keywords.push(clean.clone()); }
+    if !artist.is_empty() && artist != "未知歌手" {
+        keywords.push(format!("{} {}", artist, clean));
+    }
+    if clean != title && !title.is_empty() { keywords.push(title.to_string()); }
+
+    let mut chosen: Option<serde_json::Value> = None;
+    for kw in &keywords {
+        if let Some(cands) = search(kw) {
+            if let Some(c) = pick_match(&cands, &clean, artist, dur_ms) {
+                chosen = Some(c);
+                break;
+            }
+        }
+    }
+    let chosen = chosen?;
     let dpath = format!(
         "/download?ver=1&client=pc&id={}&accesskey={}&fmt=lrc&charset=utf8",
         id,
@@ -181,29 +239,40 @@ fn parse_lrc(s: &str) -> Vec<Line> {
 /// Spawn the fetch worker. Watches the media snapshot; fetches lyrics once per new song.
 pub fn start() {
     std::thread::spawn(|| {
+        use std::time::Instant;
         let mut last = String::new();
+        let mut last_try: Option<(String, Instant)> = None;
         loop {
             if let Some(np) = crate::media::now() {
                 let k = key(&np.title, &np.artist);
-                if k != last {
+                let fresh = k != last;
+                if fresh {
                     last = k.clone();
-                    let cached = cache().lock().ok().and_then(|c| c.map.get(&k).cloned());
+                }
+                // fetch on a new song, or retry a failed one every 15 s
+                let due = last_try.as_ref().is_none_or(|(tk, t)| tk != &k || t.elapsed() >= Duration::from_secs(15));
+                if fresh || due {
+                    last_try = Some((k.clone(), Instant::now()));
+                    let cached = cache().lock().ok().and_then(|c| c.map.get(&k).cloned()).flatten();
                     let entry = match cached {
-                        Some(v) => v,
+                        Some(v) => Some(v),
                         None => {
-                            let got = fetch(&np.title, np.duration).map(Arc::new);
-                            if let Ok(mut c) = cache().lock() {
-                                if c.map.len() > 40 {
-                                    c.map.clear();
+                            let got = fetch(&np.title, &np.artist, np.duration).map(Arc::new);
+                            if got.is_some() {
+                                // only cache successes, so failures get retried
+                                if let Ok(mut c) = cache().lock() {
+                                    if c.map.len() > 40 {
+                                        c.map.clear();
+                                    }
+                                    c.map.insert(k.clone(), got.clone());
                                 }
-                                c.map.insert(k.clone(), got.clone());
                             }
                             got
                         }
                     };
                     if let Ok(mut c) = cache().lock() {
                         c.active = entry;
-                        c.active_key = k;
+                        c.active_key = k.clone();
                     }
                 }
             }
