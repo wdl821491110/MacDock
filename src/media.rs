@@ -1,8 +1,9 @@
 //! Now-playing reader. Polls the Windows media session on a background MTA thread
 //! (WinRT calls must not run on the UI thread). The menu bar reads `now()` from its
-//! 1-second tick and redraws only when the snapshot changes.
+//! tick and redraws only when the snapshot changes. Playback commands are queued
+//! from the UI thread and executed on the same MTA thread.
 
-use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -23,15 +24,30 @@ pub struct NowPlaying {
     pub playing: bool,
 }
 
+#[derive(Clone, Copy)]
+pub enum Cmd {
+    Prev,
+    Toggle,
+    Next,
+}
+
 static STATE: OnceLock<Mutex<Option<NowPlaying>>> = OnceLock::new();
+static CMDQ: OnceLock<Mutex<VecDeque<Cmd>>> = OnceLock::new();
 
 thread_local! {
-    static MANAGER: RefCell<Option<Manager>> = const { RefCell::new(None) };
+    static MANAGER: std::cell::RefCell<Option<Manager>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Latest snapshot from the media worker. Cheap: one lock + clone of a few strings.
 pub fn now() -> Option<NowPlaying> {
     STATE.get_or_init(|| Mutex::new(None)).lock().ok().and_then(|g| g.clone())
+}
+
+/// Queue a playback command from the UI thread; the MTA worker executes it.
+pub fn command(c: Cmd) {
+    if let Ok(mut q) = CMDQ.get_or_init(|| Mutex::new(VecDeque::new())).lock() {
+        q.push_back(c);
+    }
 }
 
 fn session() -> Option<Session> {
@@ -72,6 +88,26 @@ fn read_once() -> Option<NowPlaying> {
     Some(NowPlaying { title, artist, position, duration, playing })
 }
 
+fn drain_cmds() {
+    let batch: Vec<Cmd> = {
+        let Ok(mut q) = CMDQ.get_or_init(|| Mutex::new(VecDeque::new())).lock() else { return };
+        q.drain(..).collect()
+    };
+    if batch.is_empty() {
+        return;
+    }
+    if let Some(s) = session() {
+        for c in batch {
+            let r = match c {
+                Cmd::Prev => s.TrySkipPreviousAsync(),
+                Cmd::Next => s.TrySkipNextAsync(),
+                Cmd::Toggle => s.TryTogglePlayPauseAsync(),
+            };
+            let _ = r.and_then(|o| o.get());
+        }
+    }
+}
+
 /// Spawn the reader. Safe to call once at startup.
 pub fn start() {
     std::thread::spawn(|| {
@@ -79,11 +115,12 @@ pub fn start() {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
         loop {
+            drain_cmds();
             let snap = read_once();
             if let Ok(mut st) = STATE.get_or_init(|| Mutex::new(None)).lock() {
                 *st = snap;
             }
-            std::thread::sleep(Duration::from_millis(1000));
+            std::thread::sleep(Duration::from_millis(200));
         }
     });
 }

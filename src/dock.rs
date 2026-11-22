@@ -1331,8 +1331,23 @@ impl Dock {
                 }
             }
             Do::QuitApp => {
-                for w in &self.items[i].wins {
-                    shell::close(w.hwnd);
+                // Collect the app's pids first (owned), so we can re-enumerate every
+                // visible window of those processes. Closing only the handful of
+                // windows cached in the dock item often fails (stale/hidden hwnds).
+                let pids: Vec<u32> = self.items.get(i)
+                    .map(|it| it.wins.iter().map(|w| w.pid).collect())
+                    .unwrap_or_default();
+                let all = self.shell.app_windows();
+                for w in &all {
+                    if pids.contains(&w.pid) {
+                        shell::close(w.hwnd);
+                    }
+                }
+                // fallback: also signal the windows we had cached
+                if let Some(it) = self.items.get(i) {
+                    for w in &it.wins {
+                        shell::close(w.hwnd);
+                    }
                 }
             }
             Do::ChangeIcon => {

@@ -29,6 +29,17 @@ const GLYPH_PX: f64 = 15.0;
 const PAD_X: f64 = 9.0; // inside each button
 const GAP: f64 = 1.0; // between buttons
 const SIDE: f64 = 10.0; // from the screen edges
+
+// Now-playing item layout (DIPs, relative to content origin cx).
+const MUSIC_W: f64 = 360.0;      // total fixed content width
+const MUSIC_NAME_X: f64 = 20.0;  // song name after the note icon
+const MUSIC_NAME_W: f64 = 105.0;
+const BTN_PREV: f64 = 130.0;     // transport buttons
+const BTN_PLAY: f64 = 152.0;
+const BTN_NEXT: f64 = 174.0;
+const BTN_W: f64 = 18.0;
+const MUSIC_LYRIC_X: f64 = 200.0;
+const MUSIC_LYRIC_W: f64 = 150.0;
 const CB_APPBAR: u32 = WM_APP + 21;
 const TIMER_TICK: usize = 1;
 const TIMER_DISPLAY: usize = 2;
@@ -310,7 +321,6 @@ pub struct MenuBar {
     clock: String,
     update: bool, // a newer release is out: dot on the logo, item in its menu
     music: Option<crate::media::NowPlaying>,
-    music_pos: f64, // last drawn position, so the bar redraws as a song progresses
     lyric: Option<String>, // current lyric line for the playing song
     battery: Option<(u8, bool, bool)>,
     net: Net,
@@ -329,7 +339,7 @@ impl MenuBar {
             hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray, battery_pct,
             ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
             surface: None, dark_text: false, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
-            app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, music: None, music_pos: -1.0, lyric: None, battery: b, net: n,
+            app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, music: None, lyric: None, battery: b, net: n,
             ticks: 0, tracking: false, dirty: true, auto_hide_dock: false,
         }
     }
@@ -337,7 +347,7 @@ impl MenuBar {
     pub fn start(&mut self) {
         self.load_frost();
         unsafe {
-            SetTimer(self.hwnd, TIMER_TICK, 1000, None);
+            SetTimer(self.hwnd, TIMER_TICK, 250, None);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
         self.place();
@@ -417,7 +427,7 @@ impl MenuBar {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
                 let _ = KillTimer(self.hwnd, TIMER_TICK);
             } else {
-                SetTimer(self.hwnd, TIMER_TICK, 1000, None);
+                SetTimer(self.hwnd, TIMER_TICK, 250, None);
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
                 self.tick(true);
                 self.dirty = true;
@@ -486,17 +496,11 @@ impl MenuBar {
         }
         let m = crate::media::now();
         if m != self.music {
+            // includes position: scrubbing the progress bar updates the snapshot, so the
+            // lyric line and the play/pause glyph follow within one tick (250 ms).
             self.music = m;
-            self.music_pos = -1.0;
             self.dirty = true;
-        } else if let Some(np) = &self.music {
-            // progress bar advances between title changes
-            if (np.position - self.music_pos).abs() > 0.9 {
-                self.music_pos = np.position;
-                self.dirty = true;
-            }
         }
-        // current lyric line follows playback position
         let ly = self.music.as_ref().and_then(|np| crate::lyrics::current(np.position));
         if ly != self.lyric {
             self.lyric = ly;
@@ -563,7 +567,7 @@ impl MenuBar {
             }
             BarEv::Up(x) => {
                 let i = self.slot_at(x)?;
-                return self.click(i);
+                return self.click(i, x);
             }
             BarEv::RightUp(x) => {
                 let i = self.slot_at(x)?;
@@ -669,13 +673,21 @@ impl MenuBar {
         self.slots.iter().position(|s| x >= s.x - GAP && x < s.x + s.w + GAP)
     }
 
-    fn click(&mut self, i: usize) -> Option<BarAct> {
+    fn click(&mut self, i: usize, x_px: i32) -> Option<BarAct> {
         let s = &self.slots[i];
         let (l, r) = (self.px(s.x), self.px(s.x + s.w));
         match s.item {
             Item::Logo | Item::App | Item::Menu(_) => return self.show_menu(i),
             Item::Chevron => return Some(BarAct::Flyout(Extra::Tray, l, r)),
-            Item::Music => return Some(BarAct::Flyout(Extra::ControlCenter, l, r)),
+            Item::Music => {
+                // hit-test the three transport buttons inside the item
+                let rel = x_px as f64 / self.dpi - s.x;
+                if let Some(cmd) = self.music_hit(rel) {
+                    crate::media::command(cmd);
+                    return None;
+                }
+                return Some(BarAct::Flyout(Extra::ControlCenter, l, r));
+            }
             Item::Ai => return Some(BarAct::Flyout(Extra::Ai, l, r)),
             Item::Battery => return Some(BarAct::Flyout(Extra::Battery, l, r)),
             Item::Net => return Some(BarAct::Flyout(Extra::Wifi, l, r)),
@@ -952,9 +964,6 @@ Open the download page?")) {
         if self.tray {
             right.push(Item::Chevron);
         }
-        if self.music.is_some() {
-            right.push(Item::Music);
-        }
         if self.ai && self.ai_live {
             right.push(Item::Ai);
         }
@@ -968,6 +977,11 @@ Open the download page?")) {
             x -= w + GAP;
             slots.push(Slot { item: it, x, w });
             x -= GAP;
+        }
+        // Now-playing sits in the centre of the menu bar.
+        if self.music.is_some() {
+            let w = self.content_w(Item::Music) + PAD_X * 2.0;
+            slots.push(Slot { item: Item::Music, x: (self.screen_w - w) / 2.0, w });
         }
         self.slots = slots;
     }
@@ -1095,58 +1109,61 @@ Open the download page?")) {
 
     /// Now-playing: a note, "artist – title" (truncated) and a thin progress bar underneath.
     fn music_w(&self) -> f64 {
-        // fixed width while music plays, so changing lyric lines never shift the other status items
-        let note = self.text_w("\u{E718}", self.glyph_font(12.0));
-        note + 4.0 + 150.0
+        MUSIC_W // fixed width: changing song/lyric never shifts the other status items
     }
 
-    fn music_label(&self, m: &crate::media::NowPlaying) -> String {
-        // show the current lyric line when we have one, with the song title as fallback
-        if let Some(l) = &self.lyric {
-            if !l.is_empty() {
-                return l.clone();
-            }
-        }
-        if m.artist.is_empty() {
-            m.title.clone()
+    /// Which transport button was clicked? `rel` is DIPs from the slot's left edge.
+    fn music_hit(&self, rel: f64) -> Option<crate::media::Cmd> {
+        let x = rel - PAD_X; // content origin
+        if (BTN_PREV - 3.0..BTN_PREV + BTN_W + 3.0).contains(&x) {
+            Some(crate::media::Cmd::Prev)
+        } else if (BTN_PLAY - 3.0..BTN_PLAY + BTN_W + 3.0).contains(&x) {
+            Some(crate::media::Cmd::Toggle)
+        } else if (BTN_NEXT - 3.0..BTN_NEXT + BTN_W + 3.0).contains(&x) {
+            Some(crate::media::Cmd::Next)
         } else {
-            format!("{} – {}", m.artist, m.title)
+            None
         }
+    }
+
+    fn fit(&self, s: &str, f: Font, max_px: f32) -> String {
+        let mut out = s.to_string();
+        while !out.is_empty() && gfx::measure(&out, f).0 as f32 > max_px {
+            out.pop();
+        }
+        if out != s && out.len() > 1 {
+            out.pop();
+            out.push('\u{2026}');
+        }
+        out
     }
 
     fn draw_music(&self, pm: &mut Pixmap, cx: f32, mid: f32, dpi: f32) {
         let Some(m) = &self.music else { return };
-        // note glyph
-        self.draw_text(pm, "\u{E718}", self.glyph_font(12.0), cx, mid);
-        let note_w = self.text_w("\u{E718}", self.glyph_font(12.0)) as f32 * dpi;
-        let tx = cx + note_w + 4.0 * dpi;
-
         let f = self.font(400);
-        let full = self.music_label(m);
-        let max_w = 150.0 * dpi;
-        // truncate to available pixels
-        let mut label = full.clone();
-        while !label.is_empty() && gfx::measure(&label, f).0 as f32 > max_w {
-            label.pop();
-        }
-        if label != full && label.len() > 1 {
-            label.pop();
-            label.push('\u{2026}');
-        }
-        self.draw_text(pm, &label, f, tx, mid - 3.0 * dpi);
 
-        // progress bar
-        if m.duration > 0.0 {
-            let bar_w = max_w.min(gfx::measure(&label, f).0 as f32).max(24.0 * dpi);
-            let y = mid + 6.0 * dpi;
-            if let Some(p) = gfx::rrect(tx, y, bar_w, 2.0 * dpi, 1.0 * dpi) {
-                pm.fill_path(&p, &white(0x55), FillRule::Winding, Transform::identity(), None);
-            }
-            let frac = (m.position / m.duration).clamp(0.0, 1.0) as f32;
-            if frac > 0.0 {
-                if let Some(p) = gfx::rrect(tx, y, bar_w * frac, 2.0 * dpi, 1.0 * dpi) {
-                    pm.fill_path(&p, &white(0xE0), FillRule::Winding, Transform::identity(), None);
-                }
+        // 1. song icon
+        self.draw_text(pm, "\u{E718}", self.glyph_font(13.0), cx, mid);
+
+        // 2. song name: artist – title
+        let name = if m.artist.is_empty() { m.title.clone() } else { format!("{} – {}", m.artist, m.title) };
+        let name = self.fit(&name, f, MUSIC_NAME_W as f32 * dpi);
+        self.draw_text(pm, &name, f, cx + MUSIC_NAME_X as f32 * dpi, mid);
+
+        // 3. transport buttons: previous / play-pause / next
+        let prev = "\u{E892}";
+        let play = if m.playing { "\u{E769}" } else { "\u{E768}" };
+        let next = "\u{E893}";
+        let gf = self.glyph_font(12.0);
+        self.draw_text(pm, prev, gf, cx + BTN_PREV as f32 * dpi, mid);
+        self.draw_text(pm, play, gf, cx + BTN_PLAY as f32 * dpi, mid);
+        self.draw_text(pm, next, gf, cx + BTN_NEXT as f32 * dpi, mid);
+
+        // 4. current lyric line (falls back to nothing when there is no lyric)
+        if let Some(l) = &self.lyric {
+            if !l.is_empty() {
+                let l = self.fit(l, f, MUSIC_LYRIC_W as f32 * dpi);
+                self.draw_text(pm, &l, f, cx + MUSIC_LYRIC_X as f32 * dpi, mid);
             }
         }
     }
