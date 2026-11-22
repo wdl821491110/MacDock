@@ -1026,12 +1026,12 @@ Open the download page?")) {
                 Item::Menu(m) => self.draw_text(&mut content, crate::i18n::t(m), self.font(500), cx, mid),
                 Item::Chevron => self.draw_text(&mut content, "\u{E70E}", self.glyph_font(11.0), cx, mid),
                 Item::TrayPinned(i) => {
-                    if let Some(Some(img)) = self.pinned_icons.get(i) {
+                    if let Some((_, Some(img))) = self.pinned_icons.get(i) {
                         let size = 18.0 * dpi;
                         content.draw_pixmap(
                             (cx + 1.0 * dpi).round() as i32,
                             (mid - size / 2.0).round() as i32,
-                            img.as_ref(),
+                            img,
                             &PixmapPaint::default(),
                             Transform::identity(),
                             None,
