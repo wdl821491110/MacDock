@@ -5,9 +5,6 @@ use serde_json::{json, Map, Value};
 #[derive(Clone)]
 pub struct Config {
     pub pinned: Vec<String>,
-    /// Tray app icons pinned to the top menu bar. Each entry is "exe path|display name";
-    /// its icon snapshot lives in %APPDATA%\MacDock\tray\<hash>.png.
-    pub menu_pinned: Vec<String>,
     pub icon_size: f64,
     pub magnify: f64,
     pub hide_taskbar: bool,
@@ -91,21 +88,6 @@ pub fn path() -> String {
     format!("{}\\config.json", dir())
 }
 
-/// Directory holding icon snapshots of tray apps pinned to the menu bar.
-pub fn tray_icon_dir() -> String {
-    format!("{}\\tray", dir())
-}
-
-/// Stable file name for a pinned tray icon, derived from its "exe|name" key.
-pub fn tray_icon_file(key: &str) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in key.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("{}\\{:016x}.png", tray_icon_dir(), h)
-}
-
 /// The dock's Apps item (macOS 26's Launchpad icon): opens the Apps window, or the full-screen Launchpad.
 pub const APPS_ITEM: &str = "macdock:apps";
 
@@ -125,7 +107,6 @@ impl Default for Config {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-            menu_pinned: Vec::new(),
             icon_size: 52.0,
             magnify: 1.75,
             hide_taskbar: true,
@@ -214,9 +195,6 @@ impl Config {
         if let Some(Value::Array(p)) = v.remove("Pinned") {
             c.pinned = p.iter().filter_map(|s| s.as_str().map(String::from)).collect();
         }
-        if let Some(Value::Array(p)) = v.remove("MenuPinned") {
-            c.menu_pinned = p.iter().filter_map(|s| s.as_str().map(String::from)).collect();
-        }
         if let Some(x) = v.remove("IconSize").and_then(|x| x.as_f64()) {
             c.icon_size = x.clamp(ICON_SIZE.0, ICON_SIZE.1);
         }
@@ -245,7 +223,6 @@ impl Config {
         let mut m = self.extra.clone();
         let fields = json!({
             "Pinned": self.pinned,
-            "MenuPinned": self.menu_pinned,
             "IconSize": self.icon_size,
             "Magnify": self.magnify,
             "HideTaskbar": self.hide_taskbar,

@@ -100,8 +100,7 @@ enum Item {
     App,
     Menu(&'static str),
     Chevron,
-    /// A tray app pinned to the bar; the payload indexes `pinned_icons`.
-    TrayPinned(usize),
+    Music,
     Ai,
     Battery,
     Net,
@@ -303,8 +302,6 @@ pub struct MenuBar {
     surface: Option<Surface>,
     dark_text: bool, // the wallpaper behind the bar is bright, so the content is drawn black
     slots: Vec<Slot>,
-    /// Tray apps pinned to the bar: (key "exe|name", icon snapshot loaded from disk).
-    pinned_icons: Vec<(String, Option<Pixmap>)>,
     hover: Option<usize>,
     open: Option<usize>,  // its menu or flyout is up
     target: HWND,         // the last foreground window that isn't ours
@@ -312,6 +309,8 @@ pub struct MenuBar {
     names: HashMap<u32, String>,
     clock: String,
     update: bool, // a newer release is out: dot on the logo, item in its menu
+    music: Option<crate::media::NowPlaying>,
+    music_pos: f64, // last drawn position, so the bar redraws as a song progresses
     battery: Option<(u8, bool, bool)>,
     net: Net,
     ticks: u32,
@@ -328,8 +327,8 @@ impl MenuBar {
         MenuBar {
             hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray, battery_pct,
             ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
-            surface: None, dark_text: false, slots: Vec::new(), pinned_icons: Vec::new(), hover: None, open: None, target: HWND::default(),
-            app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, battery: b, net: n,
+            surface: None, dark_text: false, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
+            app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, music: None, music_pos: -1.0, battery: b, net: n,
             ticks: 0, tracking: false, dirty: true, auto_hide_dock: false,
         }
     }
@@ -483,6 +482,18 @@ impl MenuBar {
         if b != self.battery {
             self.battery = b;
             self.dirty = true;
+        }
+        let m = crate::media::now();
+        if m != self.music {
+            self.music = m;
+            self.music_pos = -1.0;
+            self.dirty = true;
+        } else if let Some(np) = &self.music {
+            // progress bar advances between title changes
+            if (np.position - self.music_pos).abs() > 0.9 {
+                self.music_pos = np.position;
+                self.dirty = true;
+            }
         }
         if self.ai {
             self.read_ai();
@@ -657,15 +668,7 @@ impl MenuBar {
         match s.item {
             Item::Logo | Item::App | Item::Menu(_) => return self.show_menu(i),
             Item::Chevron => return Some(BarAct::Flyout(Extra::Tray, l, r)),
-            Item::TrayPinned(i) => {
-                if let Some((key, _)) = self.pinned_icons.get(i) {
-                    let target = key.split('|').next().unwrap_or(key);
-                    if !target.is_empty() {
-                        shell::launch(target);
-                    }
-                }
-                return None;
-            }
+            Item::Music => return Some(BarAct::Flyout(Extra::ControlCenter, l, r)),
             Item::Ai => return Some(BarAct::Flyout(Extra::Ai, l, r)),
             Item::Battery => return Some(BarAct::Flyout(Extra::Battery, l, r)),
             Item::Net => return Some(BarAct::Flyout(Extra::Wifi, l, r)),
@@ -916,7 +919,7 @@ Open the download page?")) {
             Item::App => self.text_w(&self.app_name, self.font(700)),
             Item::Menu(m) => self.text_w(crate::i18n::t(m), self.font(500)),
             Item::Chevron => self.text_w("\u{E70E}", self.glyph_font(11.0)),
-            Item::TrayPinned(_) => 20.0,
+            Item::Music => self.music_w(),
             Item::Ai => 14.0 + if self.ai_label.is_empty() { 0.0 } else { 5.0 + self.text_w(&self.ai_label, self.font(400)) },
             Item::Battery => {
                 let t = self.battery_text();
@@ -930,22 +933,7 @@ Open the download page?")) {
         }
     }
 
-    /// Re-read the pinned tray list from config and (re)load icon snapshots when it changes.
-    fn refresh_pinned(&mut self) {
-        let keys: Vec<String> = crate::config::Config::load().menu_pinned;
-        let same = keys.len() == self.pinned_icons.len()
-            && keys.iter().zip(self.pinned_icons.iter()).all(|(k, (old, _))| k == old);
-        if same {
-            return;
-        }
-        self.pinned_icons = keys.into_iter().map(|k| {
-            let img = gfx::image_file(&crate::config::tray_icon_file(&k), 64);
-            (k, img)
-        }).collect();
-    }
-
     fn layout(&mut self) {
-        self.refresh_pinned();
         let mut slots = Vec::new();
         let mut x = SIDE;
         for it in [Item::Logo, Item::App, Item::Menu("File"), Item::Menu("Edit"), Item::Menu("View"), Item::Menu("Window"), Item::Menu("Help")] {
@@ -957,8 +945,8 @@ Open the download page?")) {
         if self.tray {
             right.push(Item::Chevron);
         }
-        for i in 0..self.pinned_icons.len() {
-            right.push(Item::TrayPinned(i));
+        if self.music.is_some() {
+            right.push(Item::Music);
         }
         if self.ai && self.ai_live {
             right.push(Item::Ai);
@@ -1025,19 +1013,7 @@ Open the download page?")) {
                 Item::App => self.draw_text(&mut content, &self.app_name, self.font(700), cx, mid),
                 Item::Menu(m) => self.draw_text(&mut content, crate::i18n::t(m), self.font(500), cx, mid),
                 Item::Chevron => self.draw_text(&mut content, "\u{E70E}", self.glyph_font(11.0), cx, mid),
-                Item::TrayPinned(i) => {
-                    if let Some((_, Some(img))) = self.pinned_icons.get(i) {
-                        let size = 18.0 * dpi;
-                        content.draw_pixmap(
-                            (cx + 1.0 * dpi).round() as i32,
-                            (mid - size / 2.0).round() as i32,
-                            img.as_ref(),
-                            &PixmapPaint::default(),
-                            Transform::identity(),
-                            None,
-                        );
-                    }
-                }
+                Item::Music => self.draw_music(&mut content, cx, mid, dpi),
                 Item::Ai => {
                     draw_ai_ring(&mut content, cx + 7.0 * dpi, mid, 6.0 * dpi, dpi, self.ai_pct, self.ai_label.ends_with("/s"));
                     if !self.ai_label.is_empty() {
@@ -1107,6 +1083,58 @@ Open the download page?")) {
         if let Some(t) = gfx::text_ex(s, f, (255, 255, 255)) {
             let y = (mid - t.height() as f32 / 2.0).round() as i32;
             pm.draw_pixmap(x.round() as i32, y, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+        }
+    }
+
+    /// Now-playing: a note, "artist – title" (truncated) and a thin progress bar underneath.
+    fn music_w(&self) -> f64 {
+        let note = self.text_w("\u{E718}", self.glyph_font(12.0));
+        let text = self.music.as_ref().map(|m| self.music_label(m)).unwrap_or_default();
+        note + 4.0 + self.text_w(&text, self.font(400)).min(150.0)
+    }
+
+    fn music_label(&self, m: &crate::media::NowPlaying) -> String {
+        if m.artist.is_empty() {
+            m.title.clone()
+        } else {
+            format!("{} – {}", m.artist, m.title)
+        }
+    }
+
+    fn draw_music(&self, pm: &mut Pixmap, cx: f32, mid: f32, dpi: f32) {
+        let Some(m) = &self.music else { return };
+        // note glyph
+        self.draw_text(pm, "\u{E718}", self.glyph_font(12.0), cx, mid);
+        let note_w = self.text_w("\u{E718}", self.glyph_font(12.0)) as f32 * dpi;
+        let tx = cx + note_w + 4.0 * dpi;
+
+        let f = self.font(400);
+        let full = self.music_label(m);
+        let max_w = 150.0 * dpi;
+        // truncate to available pixels
+        let mut label = full.clone();
+        while !label.is_empty() && gfx::measure(&label, f).0 as f32 > max_w {
+            label.pop();
+        }
+        if label != full && label.len() > 1 {
+            label.pop();
+            label.push('\u{2026}');
+        }
+        self.draw_text(pm, &label, f, tx, mid - 3.0 * dpi);
+
+        // progress bar
+        if m.duration > 0.0 {
+            let bar_w = max_w.min(gfx::measure(&label, f).0 as f32).max(24.0 * dpi);
+            let y = mid + 6.0 * dpi;
+            if let Some(p) = gfx::rrect(tx, y, bar_w, 2.0 * dpi, 1.0 * dpi) {
+                pm.fill_path(&p, &white(0x55), FillRule::Winding, Transform::identity(), None);
+            }
+            let frac = (m.position / m.duration).clamp(0.0, 1.0) as f32;
+            if frac > 0.0 {
+                if let Some(p) = gfx::rrect(tx, y, bar_w * frac, 2.0 * dpi, 1.0 * dpi) {
+                    pm.fill_path(&p, &white(0xE0), FillRule::Winding, Transform::identity(), None);
+                }
+            }
         }
     }
 }

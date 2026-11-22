@@ -28,6 +28,7 @@ mod genie_gpu;
 mod gfx;
 mod menu;
 mod menubar;
+mod media;
 mod power;
 mod shell;
 mod switcher;
@@ -423,12 +424,6 @@ impl App {
                     match cmd {
                         flyout::Cmd::Launch(t) => shell::launch(&t),
                         flyout::Cmd::Pin(t) => self.dock.pin(&t),
-                        flyout::Cmd::PinMenu(_) | flyout::Cmd::UnpinMenu(_) => {
-                            // the menu bar re-reads the pinned list from config on its next layout
-                            if let Some(b) = self.bar.as_mut() {
-                                b.redraw();
-                            }
-                        }
                         flyout::Cmd::Settings => self.open_settings(),
                         flyout::Cmd::OpenWifi => {
                             if let Some((_, r)) = self.bar.as_ref().and_then(|b| b.extra_span(menubar::Extra::Wifi)) {
@@ -609,6 +604,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let _ = windows::Win32::System::Ole::OleInitialize(None); // drag and drop onto the dock
     }
+    media::start(); // now-playing snapshot for the menu bar (own MTA thread)
     let cfg = Config::load();
     i18n::set(&cfg.language);
     if cfg.hide_taskbar {
