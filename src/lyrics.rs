@@ -183,6 +183,8 @@ fn fetch(title: &str, artist: &str, duration: f64) -> Option<Vec<Line>> {
         }
     }
     let chosen = chosen?;
+    let id = chosen["id"].as_u64()?;
+    let ak = chosen["accesskey"].as_str()?;
     let dpath = format!(
         "/download?ver=1&client=pc&id={}&accesskey={}&fmt=lrc&charset=utf8",
         id,
