@@ -1031,7 +1031,7 @@ Open the download page?")) {
                         content.draw_pixmap(
                             (cx + 1.0 * dpi).round() as i32,
                             (mid - size / 2.0).round() as i32,
-                            img,
+                            img.as_ref(),
                             &PixmapPaint::default(),
                             Transform::identity(),
                             None,
